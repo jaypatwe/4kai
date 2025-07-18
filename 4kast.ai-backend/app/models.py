@@ -47,3 +47,13 @@ class ActualsUpdate(BaseModel):
 
 class SaveActualsRequest(BaseModel):
     updates: List[ActualsUpdate]
+
+
+class CustomHoliday(BaseModel):
+    name: str
+    date: str
+
+class HolidayConfig(BaseModel):
+    use_standard: bool = True
+    country: str = 'US'
+    custom: List[CustomHoliday] = []

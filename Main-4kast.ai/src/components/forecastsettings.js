@@ -260,7 +260,121 @@ const customStyles = `
     padding: 0 1px; /* Prevent scrollbar from causing page overflow */
   }
 
-  /* Rest of your existing styles... */
+  .holiday-config-section {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 20px;
+    margin-top: 25px;
+    margin-bottom: 25px;
+  }
+  
+  .holiday-config-section h4 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #333;
+    margin-top: 0;
+    margin-bottom: 20px;
+  }
+
+  .config-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 15px;
+    font-size: 15px;
+  }
+
+  .config-item input[type="checkbox"] {
+    margin-right: 10px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+
+  .config-item select {
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    font-size: 14px;
+    background-color: white;
+  }
+
+  .custom-holiday-form {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+    padding-top: 15px;
+    border-top: 1px solid #e0e0e0;
+  }
+
+  .custom-holiday-form h5 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+  }
+
+  .custom-holiday-form input[type="text"],
+  .custom-holiday-form input[type="date"] {
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 14px;
+  }
+
+  .custom-holiday-form button {
+    padding: 8px 15px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.2s;
+  }
+
+  .custom-holiday-form button:hover {
+    background-color: #0056b3;
+  }
+
+  .custom-holiday-list {
+    margin-top: 15px;
+    padding-left: 10px;
+  }
+
+  .custom-holiday-list h6 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .custom-holiday-list ul {
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .custom-holiday-list li {
+    display: flex;
+    align-items: center;
+    background-color: #e9ecef;
+    padding: 5px 10px;
+    border-radius: 4px;
+    margin-bottom: 5px;
+    font-size: 14px;
+    justify-content: space-between;
+  }
+
+  .custom-holiday-list li button {
+    background: none;
+    border: none;
+    color: #dc3545;
+    font-size: 18px;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0 5px;
+    line-height: 1;
+  }
 `;
 
 // Helper function to generate future dates from current date
@@ -453,6 +567,10 @@ const ForecastSettings = () => {
   const [forecastResults, setForecastResults] = useState(null);
   const [skippedItems, setSkippedItems] = useState([]);
   const [showForecastResults, setShowForecastResults] = useState(false);
+
+  // New variables for holidays
+  const [useStandardHolidays, setUseStandardHolidays] = useState(true);
+  const [holidayCountry, setHolidayCountry] = useState('US');
 
   const mandatoryFields = ["Date", "Demand", "StoreID", "ProductID"];
 
@@ -827,7 +945,7 @@ const ForecastSettings = () => {
       setIsLoading(false);
     }
   };
-
+  
   const handleRunModel = async () => {
     if (!canRunModel) {
       showAlert("Please fill all required fields first.", "error");
@@ -852,9 +970,12 @@ const ForecastSettings = () => {
         forecastLock: parseInt(forecastLock),
         selectedModels: forecastMethod === "Best Fit" ? [] : [selectedModel],
         timeDependentVariables: timeDependentVariables,
-        columnMappings: columnMappings
+        columnMappings: columnMappings,
+        holiday_config: { 
+          use_standard: useStandardHolidays,
+          country: holidayCountry
+      }
       };
-      debugger;
 
       showAlert("Running forecast model...", "info");
 
@@ -1422,6 +1543,35 @@ const ForecastSettings = () => {
               </button>
             </div>
           </div>
+        )}
+
+        {showColumns && (
+            <div className="holiday-config-section">
+                <h4>Holiday Configuration</h4>
+                
+                {/* Automatic Standard Holidays */}
+                <div className="config-item">
+                    <label>
+                        <input
+                            type="checkbox"
+                            checked={useStandardHolidays}
+                            onChange={(e) => setUseStandardHolidays(e.target.checked)}
+                        />
+                        Automatically include standard public holidays
+                    </label>
+                    {useStandardHolidays && (
+                        <select
+                            value={holidayCountry}
+                            onChange={(e) => setHolidayCountry(e.target.value)}
+                            style={{ marginLeft: '10px' }}
+                        >
+                            <option value="US">United States</option>
+                            <option value="IN">India</option>
+                            <option value="CA">Canada</option>
+                        </select>
+                    )}
+                </div>
+            </div>
         )}
 
         {/* Preview Table */}

@@ -22,7 +22,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, 
 from sklearn.model_selection import train_test_split
 from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel, ExpSineSquared
-from app.models import LoginRequest, ForecastInput, UploadCleanedData, DeleteFileRequest, UserCreate, UserOut, ActualsUpdate, SaveActualsRequest
+from app.models import LoginRequest, ForecastInput, UploadCleanedData, DeleteFileRequest, UserCreate, UserOut, ActualsUpdate, SaveActualsRequest, CustomHoliday, HolidayConfig
 from fastapi.responses import FileResponse
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -60,7 +60,8 @@ import pprint
 from typing import Optional
 import traceback
 from decimal import Decimal
-from passlib.hash import bcrypt 
+from passlib.hash import bcrypt
+import holidays
 
 router = APIRouter(prefix="/api/engine", tags=["engine"])
 @router.get("/status")
@@ -374,6 +375,14 @@ async def run_forecast(request: Request, current_user: str = Depends(get_current
         selected_models: List[str] = data.get("selectedModels", [])
         time_dependent_variables: List[str] = data.get("timeDependentVariables", [])
         column_mappings: Dict = data.get("columnMappings", {})
+        holiday_config_data = data.get("holiday_config", {})       
+        try:
+            holiday_config = HolidayConfig(**holiday_config_data)
+        
+        except Exception as e:
+            # Handle potential validation errors if UI sends bad data
+            holiday_config = HolidayConfig()
+            logging.warning(f"Could not get standard holidays: {holiday_config}. Error: {e}")
 
         if not filename:
             raise HTTPException(status_code=400, detail="Filename required")
@@ -392,7 +401,8 @@ async def run_forecast(request: Request, current_user: str = Depends(get_current
                 time_dependent_variables,
                 time_bucket,
                 forecast_lock,
-                column_mappings
+                column_mappings,
+                holiday_config=holiday_config
             )
 
             serializable_result = make_json_serializable(result)
@@ -510,6 +520,31 @@ def ensure_id_columns_exist(df, forecast_type):
             df["store_item"] = df["store_item"].fillna("unknown - unknown")
     
     return df
+
+#Function to build the holiday df & features
+def build_holidays_dataframe(holiday_config: HolidayConfig, all_dates: pd.Series) -> Optional[pd.DataFrame]:
+    prophet_holidays = []
+    
+    if holiday_config.use_standard:
+        try:
+            years = all_dates.dt.year.unique()
+            country_holidays = holidays.country_holidays(holiday_config.country, years=years)
+            
+            for date, name in country_holidays.items():
+                prophet_holidays.append({'holiday': name, 'ds': pd.to_datetime(date)})
+        except Exception as e:
+            print(f"Warning: Could not get standard holidays for country: {holiday_config.country}. Error: {e}")
+
+    for custom_event in holiday_config.custom:
+        try:
+            prophet_holidays.append({'holiday': custom_event.name, 'ds': pd.to_datetime(custom_event.date)})
+        except Exception as e:
+            print(f"Warning: Invalid custom holiday date format: {custom_event.date}. Error: {e}")
+
+    if not prophet_holidays:
+        return None
+        
+    return pd.DataFrame(prophet_holidays)
 
 # Function to infer frequency
 def infer_frequency(df, date_col='Date'):
@@ -1261,7 +1296,7 @@ def gaussian_process_model(train, val, test, horizon=30):
         return f"Gaussian Process Failed: {str(e)}", None
 
 # Function to forecast using various models
-def forecast_models(df, selected_models, additional_cols=None, item_col=None, forecast_type='Overall', horizon=30):
+def forecast_models(df, selected_models, additional_cols=None, item_col=None, forecast_type='Overall', horizon=30, holiday_config: HolidayConfig = None):
     # Create a copy of the dataframe to preserve the original
     df_copy = df.copy()
     
@@ -1292,6 +1327,15 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
             seasonal_period = 7
     else:
         logging.info("No seasonal models selected. Skipping seasonality detection.")
+        
+    holidays_df = None
+    if holiday_config:
+        # Note: Adjust frequency calculation if needed based on your time_bucket logic
+        freq = pd.infer_freq(df_copy.index) or 'D'
+        full_date_range_series = pd.Series(pd.date_range(start=df_copy.index.min(), end=df_copy.index.max() + pd.DateOffset(days=horizon), freq=freq))
+        
+        holidays_df = build_holidays_dataframe(holiday_config, full_date_range_series)
+    
 
     # Split data into train, val, and test
     train_val, test = train_test_split(df_copy, test_size=0.2, shuffle=False)
@@ -1549,7 +1593,7 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
                     
                     elif model_name == 'Prophet':
                         prophet_df = item_df.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})
-                        model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+                        model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,holidays=holidays_df)
                         model.fit(prophet_df)
                         # Training performance
                         train_forecast = model.predict(prophet_df)['yhat']
@@ -1772,7 +1816,7 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
         if 'Prophet' in selected_models:
             try:
                 prophet_df = df_copy.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})
-                model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+                model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, holidays=holidays_df)
                 model.fit(prophet_df)
                 # Training performance
                 train_forecast = model.predict(prophet_df)['yhat']
@@ -1891,7 +1935,7 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
     return results, future_forecasts, dates, skipped_items_log
 
 # Function to safely call forecast_models with proper date handling
-def safe_forecast_models(df, selected_models, additional_cols=None, item_col=None, forecast_type='Overall', horizon=30):
+def safe_forecast_models(df, selected_models, additional_cols=None, item_col=None, forecast_type='Overall', horizon=30, holiday_config: HolidayConfig = None):
     """A wrapper for forecast_models that ensures proper date handling"""
     try:
         # Check if Date is the index
@@ -1911,7 +1955,7 @@ def safe_forecast_models(df, selected_models, additional_cols=None, item_col=Non
             # from .app import forecast_models
 
             # Later in your code
-            results, future_forecasts, dates, skipped_items_log = forecast_models(df, selected_models, additional_cols, item_col, forecast_type, horizon)
+            results, future_forecasts, dates, skipped_items_log = forecast_models(df, selected_models, additional_cols, item_col, forecast_type, horizon, holiday_config=holiday_config)
             return results, future_forecasts, dates, skipped_items_log  # Explicitly return the result from forecast_models
 
         else:
@@ -2370,7 +2414,7 @@ def find_best_fit(results: dict, forecast_type: str, metric: str = "MAE"):
     return best_fit_summary
 
 # Running the forecast for the file -> 
-def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, selected_models, time_dependent_variables, time_bucket, forecast_lock, column_mappings):
+def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, selected_models, time_dependent_variables, time_bucket, forecast_lock, column_mappings, holiday_config: HolidayConfig):
     """Run forecasting on a file using the specified parameters"""
     try:
         with conn.cursor() as cur:
@@ -2691,7 +2735,8 @@ def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, select
             additional_cols=time_dependent_variables,
             item_col=item_col,
             forecast_type=forecast_type,
-            horizon=forecast_horizon
+            horizon=forecast_horizon,
+            holiday_config=holiday_config
         )
         
         final_results = results
