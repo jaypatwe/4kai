@@ -4,6 +4,9 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # Suppresses INFO and WARNING logs
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1' # Tells TensorFlow to use CPU only
 
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Request, Form, status, Path, Query
 from fastapi.responses import FileResponse, Response, JSONResponse
@@ -31,7 +34,6 @@ import os
 import io
 import streamlit as st
 import matplotlib.pyplot as plt
-import logging
 import csv as csv_module
 import json
 import pandas as pd
@@ -375,7 +377,8 @@ async def run_forecast(request: Request, current_user: str = Depends(get_current
         selected_models: List[str] = data.get("selectedModels", [])
         time_dependent_variables: List[str] = data.get("timeDependentVariables", [])
         column_mappings: Dict = data.get("columnMappings", {})
-        holiday_config_data = data.get("holiday_config", {})       
+        holiday_config_data = data.get("holiday_config", {})
+        best_fit_metric = data.get("bestFitMetric", "MAE")
         try:
             holiday_config = HolidayConfig(**holiday_config_data)
         
@@ -383,7 +386,7 @@ async def run_forecast(request: Request, current_user: str = Depends(get_current
             # Handle potential validation errors if UI sends bad data
             holiday_config = HolidayConfig()
             logging.warning(f"Could not get standard holidays: {holiday_config}. Error: {e}")
-
+        
         if not filename:
             raise HTTPException(status_code=400, detail="Filename required")
 
@@ -402,7 +405,8 @@ async def run_forecast(request: Request, current_user: str = Depends(get_current
                 time_bucket,
                 forecast_lock,
                 column_mappings,
-                holiday_config=holiday_config
+                holiday_config=holiday_config,
+                best_fit_metric=best_fit_metric
             )
 
             serializable_result = make_json_serializable(result)
@@ -1592,28 +1596,52 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
                             results[f"HWES_{item}"] = str(e)
                     
                     elif model_name == 'Prophet':
-                        prophet_df = item_df.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})
-                        model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,holidays=holidays_df)
-                        model.fit(prophet_df)
-                        # Training performance
-                        train_forecast = model.predict(prophet_df)['yhat']
-                        train_rmse, train_mape, train_mae, train_bias = calculate_metrics(item_df['Demand'].values, train_forecast)
-                        # Validation performance
-                        val_df = item_df.reset_index().rename(columns={'Date': 'ds'})
-                        val_forecast = model.predict(val_df)['yhat']
-                        val_rmse, val_mape, val_mae, val_bias = calculate_metrics(item_df['Demand'].values, val_forecast)
-                        # Test performance
-                        test_forecast = model.predict(item_df.reset_index().rename(columns={'Date': 'ds'}))['yhat']
-                        test_rmse, test_mape, test_mae, test_bias = calculate_metrics(item_df['Demand'].values, test_forecast)
-                        results[f"Prophet_{item}"] = {
-                            'train': (train_rmse, train_mape, train_mae, train_bias),
-                            'val': (val_rmse, val_mape, val_mae, val_bias),
-                            'test': (test_rmse, test_mape, test_mae, test_bias)
-                        }
-                        # Future forecast
-                        future = model.make_future_dataframe(periods=horizon)
-                        future_forecast = model.predict(future)['yhat'][-horizon:]
-                        future_forecasts[item]['Prophet'] = future_forecast.tolist()
+                        try:
+                            prophet_df = item_df.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})
+                            #initializing the model
+                            model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,holidays=holidays_df)
+                            #adding drivers
+                            if additional_cols:
+                                for driver in additional_cols:
+                                    if driver in prophet_df.columns:
+                                        logging.info(f"[Prophet] Adding regressor for item '{item}':'{driver}'")
+                                        model.add_regressor(driver)
+                                    else:
+                                        logging.warning(f"[Prophet] Driver '{driver}' not found in data for item '{item}'. Skipping.")
+                            #fitting the model
+                            model.fit(prophet_df)
+                            
+                            # Training performance
+                            train_forecast = model.predict(prophet_df)['yhat']
+                            train_rmse, train_mape, train_mae, train_bias = calculate_metrics(item_df['Demand'].values, train_forecast)
+                            # Validation performance
+                            val_df = item_df.reset_index().rename(columns={'Date': 'ds'})
+                            val_forecast = model.predict(val_df)['yhat']
+                            val_rmse, val_mape, val_mae, val_bias = calculate_metrics(item_df['Demand'].values, val_forecast)
+                            # Test performance
+                            test_forecast = model.predict(item_df.reset_index().rename(columns={'Date': 'ds'}))['yhat']
+                            test_rmse, test_mape, test_mae, test_bias = calculate_metrics(item_df['Demand'].values, test_forecast)
+                            results[f"Prophet_{item}"] = {
+                                'train': (train_rmse, train_mape, train_mae, train_bias),
+                                'val': (val_rmse, val_mape, val_mae, val_bias),
+                                'test': (test_rmse, test_mape, test_mae, test_bias)
+                            }
+                            # Future forecast
+                            future = model.make_future_dataframe(periods=horizon)
+                            
+                            if additional_cols:
+                                historical_drivers = prophet_df[['ds'] + additional_cols]
+                                future = pd.merge(future, historical_drivers, on='ds', how='left')
+                                future[additional_cols] = future[additional_cols].ffill()
+                                future[additional_cols] = future[additional_cols].bfill()
+                                future[additional_cols] = future[additional_cols].fillna(0)
+                            
+                            future_forecast = model.predict(future)['yhat'][-horizon:]
+                            future_forecasts[item]['Prophet'] = future_forecast.tolist()
+                        
+                        except Exception as e:
+                            logging.error(f"[Prophet] Model for item '{item}' failed: {e}", exc_info=True)
+                            results[f"Prophet_{item}"] = str(e)
                     
                     elif model_name == 'XGBoost':
                         xgb_metrics, xgb_forecast = xgboost_model(item_train, item_val, item_test, horizon=horizon)
@@ -1815,9 +1843,23 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
         # Prophet Model
         if 'Prophet' in selected_models:
             try:
-                prophet_df = df_copy.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})
-                model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, holidays=holidays_df)
+                prophet_df = df_copy.reset_index().rename(columns={'Date': 'ds', 'Demand': 'y'})               
+                model = Prophet(
+                    yearly_seasonality=True, 
+                    weekly_seasonality=True, 
+                    daily_seasonality=False, 
+                    holidays=holidays_df
+                )
+                if additional_cols:
+                    for driver in additional_cols:
+                        if driver in prophet_df.columns:
+                            logging.info(f"[Prophet] Adding regressor for Overall forecast: {driver}")
+                            model.add_regressor(driver)
+                        else:
+                            logging.warning(f"[Prophet] Driver '{driver}' not found in data for Overall forecast. Skipping.")
+
                 model.fit(prophet_df)
+
                 # Training performance
                 train_forecast = model.predict(prophet_df)['yhat']
                 train_rmse, train_mape, train_mae, train_bias = calculate_metrics(df_copy['Demand'].values, train_forecast)
@@ -1833,12 +1875,27 @@ def forecast_models(df, selected_models, additional_cols=None, item_col=None, fo
                     'val': (val_rmse, val_mape, val_mae, val_bias),
                     'test': (test_rmse, test_mape, test_mae, test_bias)
                 }
+
                 # Future forecast
                 future = model.make_future_dataframe(periods=horizon)
+
+                # FUTURE DATAFRAME WITH DRIVERS
+                if additional_cols:
+                    historical_drivers = prophet_df[['ds'] + additional_cols]
+                    future = pd.merge(future, historical_drivers, on='ds', how='left')
+                    future[additional_cols] = future[additional_cols].ffill()
+                    future[additional_cols] = future[additional_cols].bfill()
+                    future[additional_cols] = future[additional_cols].fillna(0)
+                
+                # This line now works because 'future' has the driver columns.
                 future_forecast = model.predict(future)['yhat'][-horizon:]
                 future_forecasts['Prophet'] = future_forecast.tolist()
+                
             except Exception as e:
+                # Add logging for errors
+                logging.error(f"[Prophet] Overall forecast failed: {e}", exc_info=True)
                 results['Prophet'] = str(e)
+            
 
         # XGBoost
         if 'XGBoost' in selected_models:
@@ -2364,47 +2421,63 @@ def find_best_fit(results: dict, forecast_type: str, metric: str = "MAE"):
     Finds the best fitting model based on a MAE on the validation set.
     """
     best_fit_summary = {}
-    metric_name = "MAE"
-    metric_index = 2
+    
+    
+    metric_map = {"RMSE": 0, "MAPE": 1, "MAE": 2, "BIAS": 3}
+    metric_name = metric.upper()
+    metric_index = metric_map.get(metric_name, 2)
 
     if forecast_type == "Overall":
         lowest_error = float('inf')
         best_model_name = "None"
-        for model_name, metrics in results.items():
-            if not isinstance(metrics, dict) or 'val' not in metrics or not metrics['val']:
-                continue
-            validation_score = metrics['val'][metric_index]
+        for model_name, metrics_data in results.items():
+            if not isinstance(metrics_data, dict) or 'val' not in metrics_data or not metrics_data['val']:
+                continue                  
+            if metric_name == "BIAS":
+                validation_score = abs(metrics_data['val'][metric_index])
+            else:
+                validation_score = metrics_data['val'][metric_index]
+
             if validation_score is not None and validation_score < lowest_error:
                 lowest_error = validation_score
                 best_model_name = model_name
+            
+            
         best_fit_summary = {
             "best_model": best_model_name,
             "metric": metric_name,
             "validation_score": lowest_error if lowest_error != float('inf') else None
         }
+        
     else:
         best_fit_per_item = {}
         items = {}
-        for key, metrics in results.items():
-            if not isinstance(metrics, dict): continue
+        for key, metrics_data in results.items():
+            if not isinstance(metrics_data, dict): continue
             try:
                 model_name, item_id = key.rsplit('_', 1)
                 if item_id not in items:
                     items[item_id] = {}
-                items[item_id][model_name] = metrics
+                items[item_id][model_name] = metrics_data
             except ValueError:
                 logging.warning(f"Could not parse model/item from key: {key}")
                 continue
         for item_id, item_models in items.items():
             lowest_error = float('inf')
             best_model_name = "None"
-            for model_name, metrics in item_models.items():
-                if 'val' not in metrics or not metrics['val']:
+            for model_name, metrics_data in item_models.items():
+                if 'val' not in metrics_data or not metrics_data['val']:
                     continue
-                validation_score = metrics['val'][metric_index]
+
+                if metric_name == "BIAS":
+                    validation_score = abs(metrics_data['val'][metric_index])
+                else:
+                    validation_score = metrics_data['val'][metric_index]
+
                 if validation_score is not None and validation_score < lowest_error:
                     lowest_error = validation_score
                     best_model_name = model_name
+                    
             best_fit_per_item[item_id] = {
                 "best_model": best_model_name,
                 "metric": metric_name,
@@ -2414,22 +2487,27 @@ def find_best_fit(results: dict, forecast_type: str, metric: str = "MAE"):
     return best_fit_summary
 
 # Running the forecast for the file -> 
-def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, selected_models, time_dependent_variables, time_bucket, forecast_lock, column_mappings, holiday_config: HolidayConfig):
+def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, selected_models, time_dependent_variables, time_bucket, forecast_lock, column_mappings, holiday_config: HolidayConfig,best_fit_metric: str = "MAE" ):
     """Run forecasting on a file using the specified parameters"""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT MODELNAME FROM DBADMIN.MODELS")
             available_model_names = [row[0] for row in cur.fetchall()]
         
-        is_best_fit_mode = not selected_models or len(selected_models) == 0
+        if not selected_models:
+            raise ValueError("No models were selected to run.")
+        
+        is_best_fit_mode = len(selected_models) > 1
+        
+        # Validate that all selected models are valid
+        invalid_models = [model for model in selected_models if model not in available_model_names]
+        if invalid_models:
+            raise ValueError(f"Invalid model(s) selected: {invalid_models}. Available models are: {available_model_names}")
+
         if is_best_fit_mode:
-            selected_models = available_model_names
-            print(f"Best Fit mode: running all available models: {selected_models}")
+            print(f"Best Fit mode: comparing models {selected_models} using metric '{best_fit_metric}'")
         else:
-            invalid_models = [model for model in selected_models if model not in available_model_names]
-            if invalid_models:
-                raise ValueError(f"Invalid model(s) selected: {invalid_models}. Available models are: {available_model_names}")
-            print(f"Running selected models: {selected_models}")
+            print(f"Running single selected model: {selected_models[0]}")
         
         # Check if metadata file exists for this file
         metadata_path = os.path.join(UPLOAD_DIR, os.path.splitext(os.path.basename(file_path))[0] + "_metadata.json")
@@ -2743,7 +2821,7 @@ def run_forecast_for_file(conn, file_path, granularity, forecast_horizon, select
         final_forecasts = future_forecasts
         
         if is_best_fit_mode:
-            best_fit_summary = find_best_fit(results, forecast_type)
+            best_fit_summary = find_best_fit(results, forecast_type, metric=best_fit_metric)
             logging.info(f"Best fit models determined: {best_fit_summary}")
             
             filtered_results = {}
@@ -3109,10 +3187,6 @@ async def download_file(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
-    
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 @router.get("/dashboard-data")
 async def get_dashboard_data(

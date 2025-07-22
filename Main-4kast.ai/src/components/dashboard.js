@@ -817,7 +817,6 @@ function KPISection({ data }) {
           title="Total Demand"
           value={formatNumber(Number(data.totalDemand.toFixed(2)))}
           icon={BarChart3}
-          trend={5.2}
           color="blue"
         />
       </Grid>
@@ -826,8 +825,7 @@ function KPISection({ data }) {
         <KPICard
           title="MAPE"
           value={`${data.mape}%`}
-          icon={Target}
-          trend={-2.1}
+          icon={Target} 
           color="blue"
         />
       </Grid>
@@ -836,7 +834,6 @@ function KPISection({ data }) {
           title="MAE"
           value={data.mae}
           icon={AlertCircle}
-          trend={1.5}
           color="green"
         />
       </Grid>
@@ -845,7 +842,6 @@ function KPISection({ data }) {
           title="Forecast Bias"
           value= {data.forecastBias !== undefined && data.forecastBias !== null ? data.forecastBias : "-"}
           icon={TrendingUp}
-          trend={-0.8}
           color="orange"
         />
       </Grid>
@@ -855,7 +851,6 @@ function KPISection({ data }) {
           title="Weighted MAPE"
           value={data.weightedMape !== undefined && data.weightedMape !== null ? data.weightedMape.toFixed(2) + "%" : "-"}
           icon={Target}
-          trend={-1.3}
           color="green"
         />
       </Grid>
@@ -1212,11 +1207,6 @@ function Dashboard1() {
                   productData={drilldownData.productData}
                   timeSeriesData={drilldownData.timeSeriesData}
                 />
-              </ChartCard>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <ChartCard title="Demand Volatility Index" onExpand={() => setExpandedChart('DVIndex')}>
-                <DemandVolatilityGauge />
               </ChartCard>
             </Grid>
           </Grid>

@@ -375,6 +375,74 @@ const customStyles = `
     padding: 0 5px;
     line-height: 1;
   }
+
+  .multi-select-dropdown {
+    position: relative;
+    width: 100%;
+    max-width: 400px; /* Or whatever width you prefer */
+  }
+
+  .multi-select-selected {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background-color: white;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 38px;
+  }
+
+  .multi-select-placeholder {
+    color: #757575;
+  }
+
+  .multi-select-options {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background-color: white;
+    border: 1px solid #ccc;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    z-index: 1000;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .multi-select-option {
+    padding: 10px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+  }
+  
+  .multi-select-option:hover {
+    background-color: #f0f7ff;
+  }
+
+  .multi-select-option input[type="checkbox"] {
+    margin-right: 10px;
+  }
+
+  .multi-select-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .multi-select-pill {
+    background-color: #e0e7ff;
+    color: #4338ca;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
 `;
 
 // Helper function to generate future dates from current date
@@ -538,7 +606,7 @@ function StoreItemComboTable({ csvData }) {
 
 const ForecastSettings = () => {
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedModels, setSelectedModels] = useState([]);
   const [timeBucket, setTimeBucket] = useState("Daily");
   const [detectedDataFrequency, setDetectedDataFrequency] = useState('daily');
   const [forecastHorizon, setForecastHorizon] = useState("0");
@@ -567,6 +635,8 @@ const ForecastSettings = () => {
   const [forecastResults, setForecastResults] = useState(null);
   const [skippedItems, setSkippedItems] = useState([]);
   const [showForecastResults, setShowForecastResults] = useState(false);
+  const [bestFitMetric, setBestFitMetric] = useState("MAE");
+  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
 
   // New variables for holidays
   const [useStandardHolidays, setUseStandardHolidays] = useState(true);
@@ -575,6 +645,18 @@ const ForecastSettings = () => {
   const mandatoryFields = ["Date", "Demand", "StoreID", "ProductID"];
 
   const measureOptions = ["Sales History", "Inventory Levels", "Demand Trends"];
+
+  const pluralTimeUnit = useMemo(() => {
+    if (!timeBucket) return 'periods'; // Fallback for safety
+    
+    const lowerCaseBucket = timeBucket.toLowerCase();
+
+    if (lowerCaseBucket === 'daily') {
+      return 'days';
+    }
+    // This works for 'weekly', 'monthly', 'yearly'
+    return lowerCaseBucket.replace(/ly$/, 's');
+  }, [timeBucket]);
 
   const granularityOptions = [
     "Overall",
@@ -850,7 +932,7 @@ const ForecastSettings = () => {
     setShowTable(false);
     setColumnMappings({});
     setTimeDependentVariables([]);
-    setSelectedModel("");
+    setSelectedModels("");
   };
 
   const handleUploadDataForCleaning = async () => {
@@ -961,20 +1043,20 @@ const ForecastSettings = () => {
         return;
       }
 
-      // Prepare the request body
       const requestBody = {
         filename: selectedDataset,
         granularity: granularity,
         forecastHorizon: parseInt(forecastHorizon),
         timeBucket: timeBucket,
         forecastLock: parseInt(forecastLock),
-        selectedModels: forecastMethod === "Best Fit" ? [] : [selectedModel],
+        selectedModels: selectedModels, 
         timeDependentVariables: timeDependentVariables,
         columnMappings: columnMappings,
+        bestFitMetric: forecastMethod === "Best Fit" ? bestFitMetric : null, 
         holiday_config: { 
           use_standard: useStandardHolidays,
           country: holidayCountry
-      }
+        }
       };
 
       showAlert("Running forecast model...", "info");
@@ -1018,7 +1100,7 @@ const ForecastSettings = () => {
         setDataSummary(newSummary);
         setShowSummary(true);
         
-        showAlert(`Model ${selectedModel} execution completed successfully!`, "success");
+        showAlert(`Model ${selectedModels} execution completed successfully!`, "success");
       } else {
         showAlert(`Warning: ${result.message || "Unknown status returned from API"}`, "warning");
       }
@@ -1029,11 +1111,13 @@ const ForecastSettings = () => {
   };
 
   useEffect(() => {
-    const requiredFilled = parseInt(forecastHorizon, 10) > 0 && forecastLock && selectedDataset;
-    // Only check selectedModel if forecastMethod is "Select From List"
-    const modelRequired = forecastMethod === "Select From List" ? selectedModel : true;
-    setCanRunModel(requiredFilled && modelRequired);
-  }, [selectedModel, forecastHorizon, forecastLock, selectedDataset, forecastMethod]);
+      const requiredFilled = parseInt(forecastHorizon, 10) > 0 && forecastLock && selectedDataset;
+      // For 'Best Fit', check if at least one model is selected. For 'Select From List', check if one is chosen.
+      const modelRequired = forecastMethod === "Select From List" 
+        ? selectedModels.length === 1 
+        : selectedModels.length > 0;
+      setCanRunModel(requiredFilled && modelRequired);
+  }, [selectedModels, forecastHorizon, forecastLock, selectedDataset, forecastMethod]);
 
   const handleDownloadForecast = async () => {
     try {
@@ -1234,6 +1318,22 @@ const ForecastSettings = () => {
     }
   };
 
+  const modelDropdownRef = useRef(null);
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      // Check if the ref is initialized and if the click is outside the component
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target)) {
+        setIsModelDropdownOpen(false);
+      }
+    };
+    // Add event listener
+    document.addEventListener("mousedown", handleClickOutside);
+    // Cleanup the event listener on component unmount
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
   return (
     <>
       <PageTitle title="Forecast Settings" />
@@ -1425,7 +1525,7 @@ const ForecastSettings = () => {
               onChange={(e) => {
                 setForecastMethod(e.target.value);
                 if (e.target.value === "Best Fit") {
-                  setSelectedModel(""); // Clear selected model when Best Fit is chosen
+                  setSelectedModels(""); // Clear selected model when Best Fit is chosen
                 }
               }} 
               className="centered-dropdown"
@@ -1545,6 +1645,88 @@ const ForecastSettings = () => {
           </div>
         )}
 
+        {/* --- Conditional Model Selection --- */}
+        {/* 1. Shown for "Best Fit" */}
+        {forecastMethod === "Best Fit" && (
+          <div className="best-fit-options" style={{ marginTop: "20px" }}>
+            {/* Best Fit Metric Dropdown */}
+            <div className="forecast-details">
+              <label style={{ fontSize: "18px" }}><strong>Best Fit Metric :</strong></label>
+              <select value={bestFitMetric} onChange={(e) => setBestFitMetric(e.target.value)}>
+                <option value="MAE">MAE (Mean Absolute Error)</option>
+                <option value="MAPE">MAPE (Mean Absolute Percentage Error)</option>
+                <option value="RMSE">RMSE (Root Mean Squared Error)</option>
+                <option value="BIAS">BIAS</option>
+              </select>
+            </div>
+            
+            {/* Multi-select Model Checklist */}
+            <div className="forecast-details" style={{ marginTop: "20px" }}>
+              <label style={{ fontSize: "18px", display: "block", marginBottom: "5px" }}><strong>Models to Compare :</strong></label>
+              <div className="multi-select-dropdown" ref={modelDropdownRef}>
+                <div className="multi-select-selected" onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}>
+                  {selectedModels.length > 0 ? (
+                    <div className="multi-select-pills">
+                      {selectedModels.map(model => (
+                        <span key={model} className="multi-select-pill">{model}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="multi-select-placeholder">Select models...</span>
+                  )}
+                  <span>▼</span>
+                </div>
+                {isModelDropdownOpen && (
+                  <div className="multi-select-options">
+                    {isLoadingModels ? (<p style={{padding: '10px'}}>Loading...</p>) : (
+                      models.map((modelName) => (
+                        <div key={modelName} className="multi-select-option">
+                          <input
+                            type="checkbox"
+                            id={`model-${modelName}`}
+                            value={modelName}
+                            checked={selectedModels.includes(modelName)}
+                            onChange={(e) => {
+                              const { value, checked } = e.target;
+                              setSelectedModels((prev) =>
+                                checked ? [...prev, value] : prev.filter((item) => item !== value)
+                              );
+                            }}
+                          />
+                          <label htmlFor={`model-${modelName}`} style={{width: '100%', cursor: 'pointer'}}>{modelName}</label>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. Shown for "Select From List" */}
+        {forecastMethod === "Select From List" && (
+          <div className="forecast-details">
+            <label style={{ fontSize: "18px" }}><strong>Model Name :</strong></label>
+            <select 
+              value={selectedModels[0] || ""} 
+              onChange={(e) => setSelectedModels(e.target.value ? [e.target.value] : [])} // Store as an array with one item
+              disabled={isLoadingModels}
+            >
+              <option value="">Select a Model</option>
+              {isLoadingModels ? (
+                <option value="" disabled>Loading models...</option>
+              ) : (
+                models.map((model, index) => (
+                  <option key={index} value={model}>
+                    {model}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        )}
+
         {showColumns && (
             <div className="holiday-config-section">
                 <h4>Holiday Configuration</h4>
@@ -1627,31 +1809,7 @@ const ForecastSettings = () => {
             </div>
           </div>
         )}
-
-        {/* Model Selection - Only show if "Select From List" is chosen */}
-        {forecastMethod === "Select From List" && (
-          <div className="forecast-details">
-            <label style={{ fontSize: "18px" }}><strong>Model Name :</strong></label>
-            <select 
-              value={selectedModel} 
-              onChange={(e) => setSelectedModel(e.target.value)}
-              disabled={isLoadingModels}
-            >
-              <option value="">Select a Model</option>
-              {isLoadingModels ? (
-                <option value="" disabled>Loading models...</option>
-              ) : (
-                models.map((model, index) => (
-                  <option key={index} value={typeof model === 'string' ? model : model.name}>
-                    {typeof model === 'string' ? model : model.name}
-                  </option>
-                ))
-              )}
-            </select>
-            {isLoadingModels && <span style={{ marginLeft: '10px', fontSize: '14px', color: '#666' }}>Loading...</span>}
-          </div>
-        )}
-
+        
         <div className="top-buttons">
           <button className="reset-button" onClick={resetForm}>Reset</button>
         </div>
@@ -1683,7 +1841,7 @@ const ForecastSettings = () => {
               <h5 style={{ fontSize: "16px" }}>Forecast Parameters</h5>
               <div className="input-group">
                 <label>
-                  Forecast Next {forecastHorizon || 'X'} {timeBucket.replace(/ly$/, 's').toLowerCase()}
+                  Forecast Next {forecastHorizon || 'X'} {pluralTimeUnit}
                   <span 
                     className="tooltip" 
                     title={`The number of future periods to forecast. E.g., 4 with 'Weekly' time bucket means forecasting the next 4 weeks.`}
@@ -1828,7 +1986,7 @@ const ForecastSettings = () => {
         </div>
 
         {/* Run Model Button - Show for both Best Fit and Select From List */}
-        {((forecastMethod === "Best Fit") || (forecastMethod === "Select From List" && selectedModel)) && selectedDataset && (
+        {((forecastMethod === "Best Fit") || (forecastMethod === "Select From List" && selectedModels)) && selectedDataset && (
           <div className="run-model-card">
             <h4>Model Execution</h4>
             <button
